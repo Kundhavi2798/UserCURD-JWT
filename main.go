@@ -3,17 +3,16 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"github.com/rs/cors"
-	"log"
-	"net/http"
-	"strings"
-	"time"
-
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/gorilla/mux"
 	_ "github.com/lib/pq"
+	"github.com/rs/cors"
 	"golang.org/x/crypto/bcrypt"
+	"log"
+	"net/http"
+	"strings"
 )
 
 const (
@@ -74,48 +73,6 @@ func initDB() {
 
 	fmt.Println("Database initialized successfully!")
 }
-
-// Register a new user
-//func RegisterHandler(w http.ResponseWriter, r *http.Request) {
-//	var user User
-//	if err := json.NewDecoder(r.Body).Decode(&user); err != nil {
-//		http.Error(w, "Invalid request payload", http.StatusBadRequest)
-//		return
-//	}
-//
-//	// Check if passwords match
-//	if user.Password != user.ConfirmPassword {
-//		http.Error(w, "Passwords do not match", http.StatusBadRequest)
-//		return
-//	}
-//
-//	// Check if user exists
-//	var existingUser string
-//	err := db.QueryRow("SELECT username FROM users WHERE username=$1 OR email=$2", user.Username, user.Email).Scan(&existingUser)
-//	if err == nil {
-//		http.Error(w, "User already exists", http.StatusBadRequest)
-//		return
-//	}
-//
-//	// Hash password
-//	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(user.Password), bcrypt.DefaultCost)
-//	if err != nil {
-//		http.Error(w, "Error hashing password", http.StatusInternalServerError)
-//		return
-//	}
-//
-//	// Insert new user
-//	_, err = db.Exec("INSERT INTO users (username, password, email) VALUES ($1, $2, $3)",
-//		user.Username, string(hashedPassword), user.Email)
-//	if err != nil {
-//		http.Error(w, "Database error", http.StatusInternalServerError)
-//		return
-//	}
-//
-//	w.WriteHeader(http.StatusCreated)
-//	json.NewEncoder(w).Encode(map[string]string{"message": "User registered successfully"})
-//}
-
 func RegisterHandler(w http.ResponseWriter, r *http.Request) {
 	// ✅ Add CORS headers
 	w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -185,7 +142,7 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Generate JWT token
-	token, err := generateJWT(user.Username)
+	token, err := GenerateJWT(user.Username)
 	if err != nil {
 		http.Error(w, "Error generating token", http.StatusInternalServerError)
 		return
@@ -203,7 +160,7 @@ func JWTMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 
-		tokenString = strings.TrimPrefix(tokenString, "Bearer ")
+		tokenString = strings.TrimSpace(strings.TrimPrefix(tokenString, "Bearer "))
 		fmt.Println("Received Token:", tokenString) // Debugging print
 
 		claims := &Claims{}
@@ -225,71 +182,155 @@ func JWTMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// Get user profile
+func ParseJWT(tokenString string) (*Claims, error) {
+	token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		}
+		return []byte(JWT_SECRET), nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	// Extract claims
+	if claims, ok := token.Claims.(*Claims); ok && token.Valid {
+		return claims, nil
+	} else {
+		return nil, errors.New("invalid token")
+	}
+}
+
 func ProfileHandler(w http.ResponseWriter, r *http.Request) {
-	username := r.Header.Get("Username")
+	// Extract username from JWT token
+	username, err := ExtractUsernameFromToken(r)
+	if err != nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	fmt.Println("username in profile", username)
+
 	var user User
-	err := db.QueryRow("SELECT username, email FROM users WHERE username=$1", username).Scan(&user.Username, &user.Email)
+	err = db.QueryRow("SELECT username, email FROM users WHERE username=$1", username).Scan(&user.Username, &user.Email)
 	if err != nil {
 		http.Error(w, "User not found", http.StatusNotFound)
 		return
 	}
+	log.Printf("✅ Profile API Response: %+v\n", user) // Debug log
+
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(user)
+}
+
+// ExtractUsernameFromToken extracts the username from JWT
+func ExtractUsernameFromToken(r *http.Request) (string, error) {
+	tokenString := r.Header.Get("Authorization")
+	if tokenString == "" {
+		return "", fmt.Errorf("no token provided")
+	}
+
+	// Remove "Bearer " prefix if present
+	parts := strings.Split(tokenString, " ")
+	if len(parts) == 2 {
+		tokenString = parts[1]
+	}
+
+	// Parse token
+	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method")
+		}
+		return []byte(JWT_SECRET), nil
+	})
+	if err != nil {
+		return "", err
+	}
+
+	// Extract username claim
+	if claims, ok := token.Claims.(jwt.MapClaims); ok && token.Valid {
+		username, ok := claims["username"].(string)
+		if !ok {
+			return "", fmt.Errorf("username not found in token")
+		}
+		return username, nil
+	}
+
+	return "", fmt.Errorf("invalid token")
 }
 
 // Update user password
 func UpdatePasswordHandler(w http.ResponseWriter, r *http.Request) {
-	username := r.Header.Get("Username")
-	var user User
-	if err := json.NewDecoder(r.Body).Decode(&user); err != nil {
-		http.Error(w, "Invalid request payload", http.StatusBadRequest)
+	// Extract username from JWT token
+	username, err := ExtractUsernameFromToken(r)
+	if err != nil {
+		http.Error(w, `{"error": "Unauthorized"}`, http.StatusUnauthorized)
+		return
+	}
+
+	var req struct {
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error": "Invalid request payload"}`, http.StatusBadRequest)
 		return
 	}
 
 	// Hash new password
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(user.Password), bcrypt.DefaultCost)
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 	if err != nil {
-		http.Error(w, "Error hashing password", http.StatusInternalServerError)
+		http.Error(w, `{"error": "Error hashing password"}`, http.StatusInternalServerError)
 		return
 	}
 
 	_, err = db.Exec("UPDATE users SET password=$1 WHERE username=$2", hashedPassword, username)
 	if err != nil {
-		http.Error(w, "Error updating password", http.StatusInternalServerError)
+		http.Error(w, `{"error": "Error updating password"}`, http.StatusInternalServerError)
 		return
 	}
 
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"message": "Password updated successfully"})
 }
 
 // Update user email
 func UpdateEmailHandler(w http.ResponseWriter, r *http.Request) {
-	username := r.Header.Get("Username")
-	var user User
-	if err := json.NewDecoder(r.Body).Decode(&user); err != nil {
-		http.Error(w, "Invalid request payload", http.StatusBadRequest)
-		return
-	}
-
-	_, err := db.Exec("UPDATE users SET email=$1 WHERE username=$2", user.Email, username)
+	// Extract username from JWT token
+	username, err := ExtractUsernameFromToken(r)
 	if err != nil {
-		http.Error(w, "Error updating email", http.StatusInternalServerError)
+		http.Error(w, `{"error": "Unauthorized"}`, http.StatusUnauthorized)
 		return
 	}
 
+	var req struct {
+		Email string `json:"email"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error": "Invalid request payload"}`, http.StatusBadRequest)
+		return
+	}
+
+	_, err = db.Exec("UPDATE users SET email=$1 WHERE username=$2", req.Email, username)
+	if err != nil {
+		http.Error(w, `{"error": "Error updating email"}`, http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"message": "Email updated successfully"})
 }
 
-// Generate JWT token
-func generateJWT(username string) (string, error) {
-	claims := &Claims{
-		Username: username,
+func GenerateJWT(username string) (string, error) {
+	claims := Claims{
+		Username:         username,
 		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour * 24)),
+			// You can set expiration time here
 		},
 	}
+
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	return token.SignedString([]byte(JWT_SECRET))
+
 }
 
 // Main function
