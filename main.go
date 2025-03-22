@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"github.com/rs/cors"
 	"log"
 	"net/http"
 	"strings"
@@ -31,7 +32,7 @@ type User struct {
 	ID              int    `json:"id"`
 	Username        string `json:"username"`
 	Password        string `json:"password,omitempty"`
-	ConfirmPassword string `json:"confirm_password,omitempty"`
+	ConfirmPassword string `json:"confirmPassword,omitempty"`
 	Email           string `json:"email,omitempty"`
 }
 
@@ -75,7 +76,58 @@ func initDB() {
 }
 
 // Register a new user
+//func RegisterHandler(w http.ResponseWriter, r *http.Request) {
+//	var user User
+//	if err := json.NewDecoder(r.Body).Decode(&user); err != nil {
+//		http.Error(w, "Invalid request payload", http.StatusBadRequest)
+//		return
+//	}
+//
+//	// Check if passwords match
+//	if user.Password != user.ConfirmPassword {
+//		http.Error(w, "Passwords do not match", http.StatusBadRequest)
+//		return
+//	}
+//
+//	// Check if user exists
+//	var existingUser string
+//	err := db.QueryRow("SELECT username FROM users WHERE username=$1 OR email=$2", user.Username, user.Email).Scan(&existingUser)
+//	if err == nil {
+//		http.Error(w, "User already exists", http.StatusBadRequest)
+//		return
+//	}
+//
+//	// Hash password
+//	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(user.Password), bcrypt.DefaultCost)
+//	if err != nil {
+//		http.Error(w, "Error hashing password", http.StatusInternalServerError)
+//		return
+//	}
+//
+//	// Insert new user
+//	_, err = db.Exec("INSERT INTO users (username, password, email) VALUES ($1, $2, $3)",
+//		user.Username, string(hashedPassword), user.Email)
+//	if err != nil {
+//		http.Error(w, "Database error", http.StatusInternalServerError)
+//		return
+//	}
+//
+//	w.WriteHeader(http.StatusCreated)
+//	json.NewEncoder(w).Encode(map[string]string{"message": "User registered successfully"})
+//}
+
 func RegisterHandler(w http.ResponseWriter, r *http.Request) {
+	// ✅ Add CORS headers
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	// ✅ Handle OPTIONS preflight request
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
 	var user User
 	if err := json.NewDecoder(r.Body).Decode(&user); err != nil {
 		http.Error(w, "Invalid request payload", http.StatusBadRequest)
@@ -88,22 +140,12 @@ func RegisterHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check if user exists
-	var existingUser string
-	err := db.QueryRow("SELECT username FROM users WHERE username=$1 OR email=$2", user.Username, user.Email).Scan(&existingUser)
-	if err == nil {
-		http.Error(w, "User already exists", http.StatusBadRequest)
-		return
-	}
-
 	// Hash password
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(user.Password), bcrypt.DefaultCost)
 	if err != nil {
 		http.Error(w, "Error hashing password", http.StatusInternalServerError)
 		return
 	}
-
-	// Insert new user
 	_, err = db.Exec("INSERT INTO users (username, password, email) VALUES ($1, $2, $3)",
 		user.Username, string(hashedPassword), user.Email)
 	if err != nil {
@@ -111,8 +153,13 @@ func RegisterHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Simulate user creation (replace with database logic)
+	response := map[string]string{
+		"message": "User registered successfully",
+		"email":   user.Email,
+	}
 	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(map[string]string{"message": "User registered successfully"})
+	json.NewEncoder(w).Encode(response)
 }
 
 // Login and generate JWT
@@ -251,11 +298,17 @@ func main() {
 	router := mux.NewRouter()
 
 	router.HandleFunc("/register", RegisterHandler).Methods("POST")
+	handler := cors.New(cors.Options{
+		AllowedOrigins:   []string{"http://localhost:4200"}, // Angular frontend
+		AllowedMethods:   []string{"GET", "POST", "OPTIONS"},
+		AllowedHeaders:   []string{"Content-Type", "Authorization"},
+		AllowCredentials: true,
+	}).Handler(router)
 	router.HandleFunc("/login", LoginHandler).Methods("POST")
 	router.HandleFunc("/profile", JWTMiddleware(ProfileHandler)).Methods("GET")
 	router.HandleFunc("/update-password", JWTMiddleware(UpdatePasswordHandler)).Methods("POST")
 	router.HandleFunc("/update-email", JWTMiddleware(UpdateEmailHandler)).Methods("POST")
 
 	fmt.Println("Server running on port 8081...")
-	log.Fatal(http.ListenAndServe(":8081", router))
+	log.Fatal(http.ListenAndServe(":8081", handler))
 }
